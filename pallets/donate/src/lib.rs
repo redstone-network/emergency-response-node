@@ -22,12 +22,11 @@ mod benchmarking;
 // DAO
 #[derive(Encode, Decode, Eq, PartialEq, Clone, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub enum ProposalStatue {
-	Submited,
-	Canceled,
+	//Canceled,
 	Processing,
-	DidNotPass,
+	//DidNotPass,
 	Transfering, //had Passed
-	Stop,
+	//StopedTransfer,
 	AllDone,
 }
 
@@ -44,6 +43,7 @@ pub struct Proposal<AccountId> {
 #[derive(Encode, Decode, Eq, PartialEq, Clone, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub struct Org {
 	pub name: BoundedVec<u8, ConstU32<128>>,
+	pub member_count: u64,
 }
 
 #[derive(Encode, Decode, Eq, PartialEq, Copy, Clone, RuntimeDebug, TypeInfo, MaxEncodedLen)]
@@ -80,6 +80,7 @@ pub mod pallet {
 	use frame_support::pallet_prelude::*;
 	use frame_system::pallet_prelude::*;
 	use primitives::Balance;
+	use sp_std::vec::Vec;
 
 	/// Configure the pallet by specifying the parameters and types on which it depends.
 	#[pallet::config]
@@ -238,6 +239,89 @@ pub mod pallet {
 					Ok(())
 				},
 			}
+		}
+
+		#[pallet::weight(0)]
+		pub fn summon(origin: OriginFor<T>, _name: Vec<u8>, _amount: Balance) -> DispatchResult {
+			let _who = ensure_signed(origin)?;
+
+			Ok(())
+		}
+
+		#[pallet::weight(0)]
+		pub fn donate(origin: OriginFor<T>, _org_id: u64, _amount: Balance) -> DispatchResult {
+			let _who = ensure_signed(origin)?;
+
+			Ok(())
+		}
+
+		#[pallet::weight(0)]
+		pub fn submit_proposal(
+			origin: OriginFor<T>,
+			_org_id: u64,
+			_payment_requested: Balance,
+			_details: Vec<u8>,
+		) -> DispatchResult {
+			let _who = ensure_signed(origin)?;
+
+			Ok(())
+		}
+
+		#[pallet::weight(0)]
+		pub fn submit_vote(
+			origin: OriginFor<T>,
+			_org_id: u64,
+			_proposal_index: u64,
+		) -> DispatchResult {
+			let _who = ensure_signed(origin)?;
+
+			Ok(())
+		}
+
+		#[pallet::weight(0)]
+		pub fn stop_proposal_transfer(
+			origin: OriginFor<T>,
+			_org_id: u64,
+			_proposal_index: u64,
+		) -> DispatchResult {
+			let _who = ensure_signed(origin)?;
+
+			Ok(())
+		}
+
+		#[pallet::weight(0)]
+		pub fn set_recipe_done_unsigned(
+			origin: OriginFor<T>,
+			_block_number: T::BlockNumber,
+			_recipe_id: u64,
+		) -> DispatchResult {
+			let _who = ensure_signed(origin)?;
+
+			Ok(())
+		}
+
+		#[pallet::weight(0)]
+		pub fn update_recipe_triger_timestamp_unsigned(
+			origin: OriginFor<T>,
+			_block_number: T::BlockNumber,
+			_recipe_id: u64,
+			_timestamp: u64,
+		) -> DispatchResult {
+			let _who = ensure_signed(origin)?;
+
+			Ok(())
+		}
+
+		#[pallet::weight(0)]
+		pub fn update_recipe_triger_times_unsigned(
+			origin: OriginFor<T>,
+			_block_number: T::BlockNumber,
+			_recipe_id: u64,
+			_times: u64,
+		) -> DispatchResult {
+			let _who = ensure_signed(origin)?;
+
+			Ok(())
 		}
 	}
 }
