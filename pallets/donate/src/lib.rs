@@ -357,6 +357,8 @@ pub mod pallet {
 				proposal_id,
 				Proposal { votes: proposal.votes + 1, ..proposal },
 			);
+			
+			//todo check votes > (org.member_count * 2 / 3), then create transfer triger/action/recipe
 
 			Ok(())
 		}
