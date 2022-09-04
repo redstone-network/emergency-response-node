@@ -31,13 +31,14 @@ pub enum ProposalStatue {
 }
 
 #[derive(Encode, Decode, Eq, PartialEq, Clone, RuntimeDebug, TypeInfo, MaxEncodedLen)]
-pub struct Proposal<AccountId> {
+pub struct Proposal<AccountId, Balance> {
 	pub proposer: AccountId,
 	pub votes: u128,
 	pub details: BoundedVec<u8, ConstU32<128>>,
 	pub org_id: u64,
 	pub recipe_id: u128,
 	pub statue: ProposalStatue,
+	pub payment_requested: Balance,
 }
 
 #[derive(Encode, Decode, Eq, PartialEq, Clone, RuntimeDebug, TypeInfo, MaxEncodedLen)]
@@ -76,10 +77,15 @@ pub struct Recipe {
 
 #[frame_support::pallet]
 pub mod pallet {
-	use crate::{Action, Member, Org, Proposal, Recipe, Triger};
-	use frame_support::pallet_prelude::*;
+	use crate::{Action, Member, Org, Proposal, ProposalStatue, Recipe, Triger};
+	use frame_support::{
+		pallet_prelude::*,
+		traits::{Currency, ExistenceRequirement},
+		PalletId,
+	};
 	use frame_system::pallet_prelude::*;
 	use primitives::Balance;
+	use sp_runtime::traits::{AccountIdConversion, One};
 	use sp_std::vec::Vec;
 
 	/// Configure the pallet by specifying the parameters and types on which it depends.
@@ -87,7 +93,15 @@ pub mod pallet {
 	pub trait Config: frame_system::Config {
 		/// Because this pallet emits events, it depends on the runtime's definition of an event.
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
+
+		type Currency: Currency<Self::AccountId>;
+
+		#[pallet::constant]
+		type PalletId: Get<PalletId>;
 	}
+
+	pub type BalanceOf<T> =
+		<<T as Config>::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance;
 
 	#[pallet::pallet]
 	#[pallet::generate_store(pub(super) trait Store)]
@@ -107,25 +121,15 @@ pub mod pallet {
 	#[pallet::storage]
 	#[pallet::getter(fn map_org)]
 	pub(super) type MapOrg<T: Config> = StorageMap<_, Twox64Concat, u64, Org>;
-	#[pallet::storage]
-	#[pallet::getter(fn map_total_shares)]
-	pub(super) type MapTotalShares<T: Config> = StorageMap<_, Twox64Concat, u64, Balance>;
 
 	#[pallet::storage]
 	#[pallet::getter(fn members)]
-	pub type Members<T: Config> = StorageDoubleMap<
-		_,
-		Twox64Concat,
-		u64,
-		Twox64Concat,
-		T::AccountId,
-		Member<Balance>,
-		OptionQuery,
-	>;
+	pub type Members<T: Config> =
+		StorageDoubleMap<_, Twox64Concat, u64, Twox64Concat, T::AccountId, Member<BalanceOf<T>>>;
 	#[pallet::storage]
 	#[pallet::getter(fn member_orgs)]
 	pub type MemberOrgs<T: Config> =
-		StorageDoubleMap<_, Twox64Concat, T::AccountId, Twox64Concat, u64, (), OptionQuery>;
+		StorageDoubleMap<_, Twox64Concat, T::AccountId, Twox64Concat, u64, ()>;
 
 	#[pallet::storage]
 	#[pallet::getter(fn next_proposal_id)]
@@ -138,8 +142,7 @@ pub mod pallet {
 		u64,
 		Twox64Concat,
 		u64,
-		Proposal<T::AccountId>,
-		OptionQuery,
+		Proposal<T::AccountId, BalanceOf<T>>,
 	>;
 
 	#[pallet::storage]
@@ -197,6 +200,11 @@ pub mod pallet {
 		NoneValue,
 		/// Errors should have helpful documentation associated with them.
 		StorageOverflow,
+
+		OrgIdMustExist,
+		AccountMustInOrg,
+		ProposalIdMustExist,
+		ProposalMustInProcessing,
 	}
 
 	// Dispatchable functions allows users to interact with the pallet and invoke state changes.
@@ -242,15 +250,55 @@ pub mod pallet {
 		}
 
 		#[pallet::weight(0)]
-		pub fn summon(origin: OriginFor<T>, _name: Vec<u8>, _amount: Balance) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+		pub fn summon(origin: OriginFor<T>, name: Vec<u8>, amount: BalanceOf<T>) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			let next_org_id = NextOrgId::<T>::get().unwrap_or_default();
+
+			let _ = T::Currency::transfer(
+				&who,
+				&Self::org_account(next_org_id),
+				amount,
+				ExistenceRequirement::KeepAlive,
+			);
+
+			let mut bounded_name: BoundedVec<u8, ConstU32<128>> = Default::default();
+			for x in &name {
+				bounded_name.try_push(*x);
+			}
+			let org = Org { name: bounded_name, member_count: 1 };
+			MapOrg::<T>::insert(next_org_id, org);
+
+			let member = Member { shares: amount };
+			Members::<T>::insert(next_org_id, &who, member);
+			MemberOrgs::<T>::insert(&who, next_org_id, ());
+
+			NextOrgId::<T>::put(next_org_id.saturating_add(One::one()));
 
 			Ok(())
 		}
 
 		#[pallet::weight(0)]
-		pub fn donate(origin: OriginFor<T>, _org_id: u64, _amount: Balance) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+		pub fn donate(origin: OriginFor<T>, org_id: u64, amount: BalanceOf<T>) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			ensure!(MapOrg::<T>::contains_key(org_id), Error::<T>::OrgIdMustExist);
+
+			let _ = T::Currency::transfer(
+				&who,
+				&Self::org_account(org_id),
+				amount,
+				ExistenceRequirement::KeepAlive,
+			);
+
+			let org = MapOrg::<T>::get(org_id).unwrap();
+
+			MapOrg::<T>::insert(org_id, Org { name: org.name, member_count: org.member_count + 1 });
+
+			let member = Member { shares: amount }; //todo append if exist
+
+			Members::<T>::insert(org_id, &who, member);
+			MemberOrgs::<T>::insert(&who, org_id, ());
 
 			Ok(())
 		}
@@ -258,22 +306,57 @@ pub mod pallet {
 		#[pallet::weight(0)]
 		pub fn submit_proposal(
 			origin: OriginFor<T>,
-			_org_id: u64,
-			_payment_requested: Balance,
-			_details: Vec<u8>,
+			org_id: u64,
+			payment_requested: BalanceOf<T>,
+			detail: Vec<u8>,
 		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+			let who = ensure_signed(origin)?;
+
+			ensure!(MapOrg::<T>::contains_key(org_id), Error::<T>::OrgIdMustExist);
+
+			let next_proposal_id = NextProposalId::<T>::get(org_id).unwrap_or_default();
+
+			let mut bounded_detail: BoundedVec<u8, ConstU32<128>> = Default::default();
+			for x in &detail {
+				bounded_detail.try_push(*x);
+			}
+
+			let proposal = Proposal {
+				proposer: who,
+				votes: Default::default(),
+				details: bounded_detail,
+				org_id,
+				recipe_id: Default::default(),
+				statue: ProposalStatue::Processing,
+				payment_requested,
+			};
+
+			Proposals::<T>::insert(org_id, next_proposal_id, proposal);
+			NextProposalId::<T>::insert(org_id, next_proposal_id.saturating_add(One::one()));
 
 			Ok(())
 		}
 
 		#[pallet::weight(0)]
-		pub fn submit_vote(
-			origin: OriginFor<T>,
-			_org_id: u64,
-			_proposal_index: u64,
-		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
+		pub fn submit_vote(origin: OriginFor<T>, org_id: u64, proposal_id: u64) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			ensure!(MapOrg::<T>::contains_key(org_id), Error::<T>::OrgIdMustExist);
+			ensure!(
+				Proposals::<T>::contains_key(org_id, proposal_id),
+				Error::<T>::ProposalIdMustExist
+			);
+			ensure!(Members::<T>::get(org_id, who).is_some(), Error::<T>::AccountMustInOrg);
+
+			let proposal = Proposals::<T>::get(org_id, proposal_id).unwrap();
+			// proposal must in Processing
+			ensure!(ProposalStatue::Processing == proposal.statue, Error::<T>::AccountMustInOrg);
+
+			Proposals::<T>::insert(
+				org_id,
+				proposal_id,
+				Proposal { votes: proposal.votes + 1, ..proposal },
+			);
 
 			Ok(())
 		}
@@ -285,6 +368,7 @@ pub mod pallet {
 			_proposal_index: u64,
 		) -> DispatchResult {
 			let _who = ensure_signed(origin)?;
+			//todo do in version 2
 
 			Ok(())
 		}
@@ -296,6 +380,7 @@ pub mod pallet {
 			_recipe_id: u64,
 		) -> DispatchResult {
 			let _who = ensure_signed(origin)?;
+			//todo yivei
 
 			Ok(())
 		}
@@ -308,6 +393,7 @@ pub mod pallet {
 			_timestamp: u64,
 		) -> DispatchResult {
 			let _who = ensure_signed(origin)?;
+			//todo yivei
 
 			Ok(())
 		}
@@ -320,8 +406,15 @@ pub mod pallet {
 			_times: u64,
 		) -> DispatchResult {
 			let _who = ensure_signed(origin)?;
+			//todo yivei
 
 			Ok(())
+		}
+	}
+
+	impl<T: Config> Pallet<T> {
+		pub fn org_account(org_id: u64) -> T::AccountId {
+			T::PalletId::get().into_sub_account_truncating(org_id)
 		}
 	}
 }
