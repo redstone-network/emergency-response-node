@@ -106,6 +106,8 @@ pallet-uniques = { version = "4.0.0-dev", default-features = false, git = "https
 pallet-vesting = { version = "4.0.0-dev", default-features = false, git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.24" }
 pallet-whitelist = { version = "4.0.0-dev", default-features = false, git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.24" }
 
+pallet-donate = { version = "4.0.0-dev", default-features = false, path = "../pallets/donate" }
+
 [build-dependencies]
 substrate-wasm-builder = { version = "5.0.0-dev", git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.24" }
 
@@ -185,6 +187,7 @@ std = [
 	"frame-try-runtime/std",
 	"sp-io/std",
 	"pallet-child-bounties/std",
+	"pallet-donate/std",
 ]
 runtime-benchmarks = [
 	"frame-benchmarking/runtime-benchmarks",
