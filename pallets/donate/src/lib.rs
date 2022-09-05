@@ -42,9 +42,10 @@ pub struct Proposal<AccountId, Balance> {
 }
 
 #[derive(Encode, Decode, Eq, PartialEq, Clone, RuntimeDebug, TypeInfo, MaxEncodedLen)]
-pub struct Org {
+pub struct Org<Balance> {
 	pub name: BoundedVec<u8, ConstU32<128>>,
 	pub member_count: u64,
+	pub total_shares: Balance,
 }
 
 #[derive(Encode, Decode, Eq, PartialEq, Copy, Clone, RuntimeDebug, TypeInfo, MaxEncodedLen)]
@@ -120,7 +121,7 @@ pub mod pallet {
 	pub type NextOrgId<T: Config> = StorageValue<_, u64>;
 	#[pallet::storage]
 	#[pallet::getter(fn map_org)]
-	pub(super) type MapOrg<T: Config> = StorageMap<_, Twox64Concat, u64, Org>;
+	pub(super) type MapOrg<T: Config> = StorageMap<_, Twox64Concat, u64, Org<BalanceOf<T>>>;
 
 	#[pallet::storage]
 	#[pallet::getter(fn members)]
@@ -191,6 +192,11 @@ pub mod pallet {
 		/// Event documentation should end with an array that provides descriptive names for event
 		/// parameters. [something, who]
 		SomethingStored(u32, T::AccountId),
+		Summoned(T::AccountId, Vec<u8>, BalanceOf<T>),
+		Donated(T::AccountId, u64, BalanceOf<T>),
+		ProposalSubmited(T::AccountId, u64, BalanceOf<T>, Vec<u8>),
+		VoteSubmited(T::AccountId, u64, u64),
+		Transfering(u64, u64, BalanceOf<T>),
 	}
 
 	// Errors inform users that something went wrong.
@@ -262,11 +268,11 @@ pub mod pallet {
 				ExistenceRequirement::KeepAlive,
 			);
 
-			let mut bounded_name: BoundedVec<u8, ConstU32<128>> = Default::default();
-			for x in &name {
-				bounded_name.try_push(*x);
-			}
-			let org = Org { name: bounded_name, member_count: 1 };
+			let org = Org {
+				name: name.clone().try_into().unwrap(),
+				member_count: 1,
+				total_shares: amount,
+			};
 			MapOrg::<T>::insert(next_org_id, org);
 
 			let member = Member { shares: amount };
@@ -274,6 +280,8 @@ pub mod pallet {
 			MemberOrgs::<T>::insert(&who, next_org_id, ());
 
 			NextOrgId::<T>::put(next_org_id.saturating_add(One::one()));
+
+			Self::deposit_event(Event::Summoned(who, name, amount));
 
 			Ok(())
 		}
@@ -293,12 +301,29 @@ pub mod pallet {
 
 			let org = MapOrg::<T>::get(org_id).unwrap();
 
-			MapOrg::<T>::insert(org_id, Org { name: org.name, member_count: org.member_count + 1 });
+			let member_count_add = match Members::<T>::get(org_id, &who) {
+				Some(_) => 0,
+				None => 1,
+			};
 
-			let member = Member { shares: amount }; //todo append if exist
+			MapOrg::<T>::insert(
+				org_id,
+				Org {
+					member_count: org.member_count + member_count_add,
+					total_shares: org.total_shares + amount,
+					..org
+				},
+			);
+
+			let member = match Members::<T>::get(org_id, &who) {
+				Some(v) => Member { shares: v.shares + amount, ..v },
+				None => Member { shares: amount },
+			};
 
 			Members::<T>::insert(org_id, &who, member);
 			MemberOrgs::<T>::insert(&who, org_id, ());
+
+			Self::deposit_event(Event::Donated(who, org_id, amount));
 
 			Ok(())
 		}
@@ -316,15 +341,10 @@ pub mod pallet {
 
 			let next_proposal_id = NextProposalId::<T>::get(org_id).unwrap_or_default();
 
-			let mut bounded_detail: BoundedVec<u8, ConstU32<128>> = Default::default();
-			for x in &detail {
-				bounded_detail.try_push(*x);
-			}
-
 			let proposal = Proposal {
-				proposer: who,
+				proposer: who.clone(),
 				votes: Default::default(),
-				details: bounded_detail,
+				details: detail.clone().try_into().unwrap(),
 				org_id,
 				recipe_id: Default::default(),
 				statue: ProposalStatue::Processing,
@@ -333,6 +353,8 @@ pub mod pallet {
 
 			Proposals::<T>::insert(org_id, next_proposal_id, proposal);
 			NextProposalId::<T>::insert(org_id, next_proposal_id.saturating_add(One::one()));
+
+			Self::deposit_event(Event::ProposalSubmited(who, org_id, payment_requested, detail));
 
 			Ok(())
 		}
@@ -346,19 +368,48 @@ pub mod pallet {
 				Proposals::<T>::contains_key(org_id, proposal_id),
 				Error::<T>::ProposalIdMustExist
 			);
-			ensure!(Members::<T>::get(org_id, who).is_some(), Error::<T>::AccountMustInOrg);
+			ensure!(Members::<T>::get(org_id, &who).is_some(), Error::<T>::AccountMustInOrg);
 
 			let proposal = Proposals::<T>::get(org_id, proposal_id).unwrap();
 			// proposal must in Processing
-			ensure!(ProposalStatue::Processing == proposal.statue, Error::<T>::AccountMustInOrg);
-
-			Proposals::<T>::insert(
-				org_id,
-				proposal_id,
-				Proposal { votes: proposal.votes + 1, ..proposal },
+			ensure!(
+				ProposalStatue::Processing == proposal.statue,
+				Error::<T>::ProposalMustInProcessing
 			);
-			
-			//todo check votes > (org.member_count * 2 / 3), then create transfer triger/action/recipe
+
+			let org = MapOrg::<T>::get(org_id).unwrap();
+
+			print!("####{} {}", (proposal.votes + 1), (org.member_count * 2 / 3));
+			let is_pass = (proposal.votes + 1) > (org.member_count / 3 * 2).into();
+
+			if is_pass {
+				Proposals::<T>::insert(
+					org_id,
+					proposal_id,
+					Proposal {
+						votes: proposal.votes + 1,
+						statue: ProposalStatue::Transfering,
+						..proposal
+					},
+				);
+
+				Self::deposit_event(Event::Transfering(
+					org_id,
+					proposal_id,
+					proposal.payment_requested,
+				));
+			} else {
+				Proposals::<T>::insert(
+					org_id,
+					proposal_id,
+					Proposal { votes: proposal.votes + 1, ..proposal },
+				);
+			}
+
+			//todo check votes > (org.member_count * 2 / 3), then create transfer
+			// triger/action/recipe
+
+			Self::deposit_event(Event::VoteSubmited(who, org_id, proposal_id));
 
 			Ok(())
 		}
