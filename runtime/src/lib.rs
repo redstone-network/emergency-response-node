@@ -20,7 +20,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 // `construct_runtime!` does a lot of recursion and requires us to increase the limit to 256.
-#![recursion_limit = "256"]
+#![recursion_limit = "2048"]
 
 use codec::{Decode, Encode, MaxEncodedLen};
 use frame_election_provider_support::{
@@ -1473,6 +1473,16 @@ impl pallet_state_trie_migration::Config for Runtime {
 	type WeightInfo = ();
 }
 
+parameter_types! {
+	pub const DonatePalletId: PalletId = PalletId(*b"py/donat");
+}
+
+impl pallet_donate::Config for Runtime {
+	type Event = Event;
+	type Currency = Balances;
+	type PalletId = DonatePalletId;
+}
+
 construct_runtime!(
 	pub enum Runtime where
 		Block = Block,
@@ -1531,6 +1541,7 @@ construct_runtime!(
 		ConvictionVoting: pallet_conviction_voting,
 		Whitelist: pallet_whitelist,
 		NominationPools: pallet_nomination_pools,
+		DonateModule: pallet_donate,
 	}
 );
 

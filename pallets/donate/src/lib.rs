@@ -379,7 +379,6 @@ pub mod pallet {
 
 			let org = MapOrg::<T>::get(org_id).unwrap();
 
-			print!("####{} {}", (proposal.votes + 1), (org.member_count * 2 / 3));
 			let is_pass = (proposal.votes + 1) > (org.member_count / 3 * 2).into();
 
 			if is_pass {
