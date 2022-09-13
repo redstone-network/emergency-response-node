@@ -5,3 +5,6 @@
 	path = open-runtime-module-library
 	url = https://github.com/redstone-network/open-runtime-module-library.git
 	branch = polkadot-v0.9.24-asset-safe
+[submodule "emergency-response-frontend"]
+	path = emergency-response-frontend
+	url = https://github.com/redstone-network/emergency-response-frontend.git
