@@ -34,18 +34,22 @@ pub enum ProposalStatue {
 pub struct Proposal<AccountId, Balance> {
 	pub proposer: AccountId,
 	pub votes: u128,
+	pub approve_votes: u128,
+	pub deny_votes: u128,
 	pub details: BoundedVec<u8, ConstU32<128>>,
 	pub org_id: u64,
 	pub recipe_id: u128,
 	pub statue: ProposalStatue,
 	pub payment_requested: Balance,
+	pub payment_frequency: u32,
 }
 
 #[derive(Encode, Decode, Eq, PartialEq, Clone, RuntimeDebug, TypeInfo, MaxEncodedLen)]
-pub struct Org<Balance> {
+pub struct Org<AccountId, Balance> {
 	pub name: BoundedVec<u8, ConstU32<128>>,
 	pub member_count: u64,
 	pub total_shares: Balance,
+	pub treasury_id: AccountId,
 }
 
 #[derive(Encode, Decode, Eq, PartialEq, Copy, Clone, RuntimeDebug, TypeInfo, MaxEncodedLen)]
@@ -121,7 +125,8 @@ pub mod pallet {
 	pub type NextOrgId<T: Config> = StorageValue<_, u64>;
 	#[pallet::storage]
 	#[pallet::getter(fn map_org)]
-	pub(super) type MapOrg<T: Config> = StorageMap<_, Twox64Concat, u64, Org<BalanceOf<T>>>;
+	pub(super) type MapOrg<T: Config> =
+		StorageMap<_, Twox64Concat, u64, Org<T::AccountId, BalanceOf<T>>>;
 
 	#[pallet::storage]
 	#[pallet::getter(fn members)]
@@ -272,6 +277,7 @@ pub mod pallet {
 				name: name.clone().try_into().unwrap(),
 				member_count: 1,
 				total_shares: amount,
+				treasury_id: Self::org_account(next_org_id),
 			};
 			MapOrg::<T>::insert(next_org_id, org);
 
@@ -344,11 +350,14 @@ pub mod pallet {
 			let proposal = Proposal {
 				proposer: who.clone(),
 				votes: Default::default(),
+				approve_votes: Default::default(),
+				deny_votes: Default::default(),
 				details: detail.clone().try_into().unwrap(),
 				org_id,
 				recipe_id: Default::default(),
 				statue: ProposalStatue::Processing,
 				payment_requested,
+				payment_frequency: 12u32,
 			};
 
 			Proposals::<T>::insert(org_id, next_proposal_id, proposal);
@@ -360,7 +369,12 @@ pub mod pallet {
 		}
 
 		#[pallet::weight(0)]
-		pub fn submit_vote(origin: OriginFor<T>, org_id: u64, proposal_id: u64) -> DispatchResult {
+		pub fn submit_vote(
+			origin: OriginFor<T>,
+			org_id: u64,
+			proposal_id: u64,
+			vote_unit: u8,
+		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
 
 			ensure!(MapOrg::<T>::contains_key(org_id), Error::<T>::OrgIdMustExist);
@@ -387,6 +401,8 @@ pub mod pallet {
 					proposal_id,
 					Proposal {
 						votes: proposal.votes + 1,
+						approve_votes: proposal.approve_votes + if vote_unit == 0 { 1 } else { 0 },
+						deny_votes: proposal.deny_votes + if vote_unit == 1 { 1 } else { 0 },
 						statue: ProposalStatue::Transfering,
 						..proposal
 					},
@@ -401,7 +417,12 @@ pub mod pallet {
 				Proposals::<T>::insert(
 					org_id,
 					proposal_id,
-					Proposal { votes: proposal.votes + 1, ..proposal },
+					Proposal {
+						votes: proposal.votes + 1,
+						approve_votes: proposal.approve_votes + if vote_unit == 0 { 1 } else { 0 },
+						deny_votes: proposal.deny_votes + if vote_unit == 1 { 1 } else { 0 },
+						..proposal
+					},
 				);
 			}
 
