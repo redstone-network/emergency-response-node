@@ -60,12 +60,12 @@ pub struct Member<Balance> {
 //DIFTTT
 #[derive(Encode, Decode, Eq, PartialEq, Copy, Clone, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub enum Triger {
-	Timer(u64, u64, u64), //insert_time, timer_seconds, max_times
+	Timer(u64, u64, u64), //insert_time, timer_m_seconds, max_times
 }
 
 #[derive(Encode, Decode, Eq, PartialEq, Copy, Clone, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 pub enum Action<AccountId, Balance> {
-	TranferToken(AccountId, Balance),
+	TranferToken(u64, u64, AccountId, Balance), //org_id, proposal_id, reciver, amout
 }
 
 #[derive(Encode, Decode, Eq, PartialEq, Copy, Clone, RuntimeDebug, TypeInfo, MaxEncodedLen)]
@@ -85,24 +85,42 @@ pub mod pallet {
 	use crate::{Action, Member, Org, Proposal, ProposalStatue, Recipe, Triger};
 	use frame_support::{
 		pallet_prelude::*,
-		traits::{Currency, ExistenceRequirement},
+		traits::{Currency, ExistenceRequirement, UnixTime},
 		PalletId,
 	};
-	use frame_system::pallet_prelude::*;
-	use primitives::Balance;
-	use sp_runtime::traits::{AccountIdConversion, One};
-	use sp_std::vec::Vec;
+	use frame_system::{
+		offchain::{CreateSignedTransaction, SubmitTransaction},
+		pallet_prelude::*,
+	};
+	use sp_runtime::{
+		offchain::{
+			storage::StorageValueRef,
+			storage_lock::{BlockAndTime, StorageLock},
+			Duration,
+		},
+		traits::{AccountIdConversion, BlockNumberProvider, One},
+	};
+	use sp_std::{collections::btree_map::BTreeMap, prelude::*, str, vec::Vec};
+
+	const FETCH_TIMEOUT_PERIOD: u64 = 3000; // in milli-seconds
+	const LOCK_TIMEOUT_EXPIRATION: u64 = FETCH_TIMEOUT_PERIOD + 1000; // in milli-seconds
+	const LOCK_BLOCK_EXPIRATION: u32 = 3; // in block number
 
 	/// Configure the pallet by specifying the parameters and types on which it depends.
 	#[pallet::config]
-	pub trait Config: frame_system::Config {
+	pub trait Config: frame_system::Config + CreateSignedTransaction<Call<Self>> {
 		/// Because this pallet emits events, it depends on the runtime's definition of an event.
 		type Event: From<Event<Self>> + IsType<<Self as frame_system::Config>::Event>;
 
 		type Currency: Currency<Self::AccountId>;
 
+		type TimeProvider: UnixTime;
+
 		#[pallet::constant]
 		type PalletId: Get<PalletId>;
+
+		#[pallet::constant]
+		type UnsignedPriority: Get<TransactionPriority>;
 	}
 
 	pub type BalanceOf<T> =
@@ -173,7 +191,7 @@ pub mod pallet {
 	#[pallet::storage]
 	#[pallet::getter(fn map_action)]
 	pub(super) type MapAction<T: Config> =
-		StorageMap<_, Twox64Concat, u64, Action<T::AccountId, Balance>>;
+		StorageMap<_, Twox64Concat, u64, Action<T::AccountId, BalanceOf<T>>>;
 
 	#[pallet::storage]
 	#[pallet::getter(fn map_recipe)]
@@ -202,6 +220,13 @@ pub mod pallet {
 		ProposalSubmited(T::AccountId, u64, BalanceOf<T>, Vec<u8>),
 		VoteSubmited(T::AccountId, u64, u64),
 		Transfering(u64, u64, BalanceOf<T>),
+		TransferFrequency(u64, u64, u64, T::AccountId, T::AccountId, BalanceOf<T>), /* org_id,
+		                                                                             * proposal_id,
+		                                                                             * times, from,
+		                                                                             * to, amout */
+
+		RecipeDone(u64),
+		RecipeTrigerTimesUpdated(u64, u64, u64),
 	}
 
 	// Errors inform users that something went wrong.
@@ -216,6 +241,9 @@ pub mod pallet {
 		AccountMustInOrg,
 		ProposalIdMustExist,
 		ProposalMustInProcessing,
+
+		OffchainUnsignedTxError,
+		RecipeIdNotExist,
 	}
 
 	// Dispatchable functions allows users to interact with the pallet and invoke state changes.
@@ -404,9 +432,46 @@ pub mod pallet {
 						approve_votes: proposal.approve_votes + if vote_unit == 0 { 1 } else { 0 },
 						deny_votes: proposal.deny_votes + if vote_unit == 1 { 1 } else { 0 },
 						statue: ProposalStatue::Transfering,
-						..proposal
+						..proposal.clone()
 					},
 				);
+
+				let proposer = proposal.proposer;
+
+				let frequency = 12u64;
+				//triger
+				let triger_id = NextTrigerId::<T>::get().unwrap_or_default();
+				let triger = Triger::Timer(T::TimeProvider::now().as_secs(), 60, frequency);
+				MapTriger::<T>::insert(triger_id, triger.clone());
+				TrigerOwner::<T>::insert(&proposer, triger_id, ());
+				NextTrigerId::<T>::put(triger_id.saturating_add(One::one()));
+
+				//action
+				let action_id = NextActionId::<T>::get().unwrap_or_default();
+				let action = Action::TranferToken(
+					org_id,
+					proposal_id,
+					proposer.clone(),
+					proposal.payment_requested,
+				);
+				MapAction::<T>::insert(action_id, action.clone());
+				ActionOwner::<T>::insert(&proposer, action_id, ());
+				NextActionId::<T>::put(action_id.saturating_add(One::one()));
+
+				let recipe_id = NextRecipeId::<T>::get().unwrap_or_default();
+				let recipe = Recipe {
+					triger_id,
+					action_id,
+					enable: true,
+					times: 0,
+					max_times: frequency,
+					done: false,
+					last_triger_timestamp: 0,
+					force_stop: false,
+				};
+				MapRecipe::<T>::insert(recipe_id, recipe.clone());
+				RecipeOwner::<T>::insert(&proposer, recipe_id, ());
+				NextRecipeId::<T>::put(recipe_id.saturating_add(One::one()));
 
 				Self::deposit_event(Event::Transfering(
 					org_id,
@@ -425,9 +490,6 @@ pub mod pallet {
 					},
 				);
 			}
-
-			//todo check votes > (org.member_count * 2 / 3), then create transfer
-			// triger/action/recipe
 
 			Self::deposit_event(Event::VoteSubmited(who, org_id, proposal_id));
 
@@ -450,23 +512,19 @@ pub mod pallet {
 		pub fn set_recipe_done_unsigned(
 			origin: OriginFor<T>,
 			_block_number: T::BlockNumber,
-			_recipe_id: u64,
+			recipe_id: u64,
 		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
-			//todo yivei
+			ensure_none(origin)?;
 
-			Ok(())
-		}
+			ensure!(MapRecipe::<T>::contains_key(&recipe_id), Error::<T>::RecipeIdNotExist);
 
-		#[pallet::weight(0)]
-		pub fn update_recipe_triger_timestamp_unsigned(
-			origin: OriginFor<T>,
-			_block_number: T::BlockNumber,
-			_recipe_id: u64,
-			_timestamp: u64,
-		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
-			//todo yivei
+			MapRecipe::<T>::try_mutate(recipe_id, |recipe| -> DispatchResult {
+				if let Some(recipe) = recipe {
+					recipe.done = true;
+					Self::deposit_event(Event::RecipeDone(recipe_id));
+				}
+				Ok(())
+			})?;
 
 			Ok(())
 		}
@@ -475,19 +533,343 @@ pub mod pallet {
 		pub fn update_recipe_triger_times_unsigned(
 			origin: OriginFor<T>,
 			_block_number: T::BlockNumber,
-			_recipe_id: u64,
-			_times: u64,
+			recipe_id: u64,
+			times: u64,
+			timestamp: u64,
 		) -> DispatchResult {
-			let _who = ensure_signed(origin)?;
-			//todo yivei
+			ensure_none(origin)?;
+
+			ensure!(MapRecipe::<T>::contains_key(&recipe_id), Error::<T>::RecipeIdNotExist);
+
+			MapRecipe::<T>::try_mutate(recipe_id, |recipe| -> DispatchResult {
+				if let Some(recipe) = recipe {
+					recipe.times = times;
+					recipe.last_triger_timestamp = timestamp;
+					Self::deposit_event(Event::RecipeTrigerTimesUpdated(
+						recipe_id, times, timestamp,
+					));
+				}
+				Ok(())
+			})?;
 
 			Ok(())
+		}
+
+		#[pallet::weight(0)]
+		pub fn tranfer_unsigned(
+			origin: OriginFor<T>,
+			org_id: u64,
+			proposal_id: u64,
+			times: u64,
+			_block_number: T::BlockNumber,
+			reciver: T::AccountId,
+			amount: BalanceOf<T>,
+		) -> DispatchResult {
+			// This ensures that the function can only be called via unsigned transaction.
+			ensure_none(origin)?;
+
+			log::info!("###### tranfer_unsigned. org_id {:?}", org_id);
+
+			T::Currency::transfer(
+				&Self::org_account(org_id),
+				&reciver,
+				amount,
+				ExistenceRequirement::KeepAlive,
+			)
+			.map_err(|e| {
+				log::error!("###tranfer_unsigned Failed in T::Currency::transfer {:?}", e);
+				<Error<T>>::OffchainUnsignedTxError
+			});
+
+			Self::deposit_event(Event::TransferFrequency(
+				org_id,
+				proposal_id,
+				times,
+				Self::org_account(org_id),
+				reciver,
+				amount,
+			));
+
+			Ok(())
+		}
+	}
+
+	#[pallet::hooks]
+	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+		fn offchain_worker(block_number: T::BlockNumber) {
+			log::info!("###### Hello from pallet-difttt-offchain-worker.");
+
+			// let parent_hash = <frame_system::Pallet<T>>::block_hash(block_number - 1u32.into());
+			// log::info!("###### Current block: {:?} (parent hash: {:?})", block_number,
+			// parent_hash);
+
+			let timestamp_now = T::TimeProvider::now();
+			log::info!("###### Current time: {:?} ", timestamp_now.as_secs());
+
+			let store_hashmap_recipe = StorageValueRef::persistent(b"difttt_ocw::recipe_task");
+
+			let mut map_recipe_task: BTreeMap<u64, Recipe>;
+			if let Ok(Some(info)) = store_hashmap_recipe.get::<BTreeMap<u64, Recipe>>() {
+				map_recipe_task = info;
+			} else {
+				map_recipe_task = BTreeMap::new();
+			}
+
+			let mut lock = StorageLock::<BlockAndTime<Self>>::with_block_and_time_deadline(
+				b"offchain-demo::lock",
+				LOCK_BLOCK_EXPIRATION,
+				Duration::from_millis(LOCK_TIMEOUT_EXPIRATION),
+			);
+
+			let mut map_running_action_recipe_task: BTreeMap<u64, Recipe> = BTreeMap::new();
+			if let Ok(_guard) = lock.try_lock() {
+				for (recipe_id, recipe) in MapRecipe::<T>::iter() {
+					if recipe.enable && !recipe.done {
+						if !map_recipe_task.contains_key(&recipe_id) {
+							log::info!("###### map_recipe_task.insert {:?}", &recipe_id);
+							map_recipe_task.insert(
+								recipe_id,
+								Recipe {
+									triger_id: recipe.triger_id,
+									action_id: recipe.action_id,
+									enable: true,
+									times: 0,
+									max_times: 0,
+									done: false,
+									last_triger_timestamp: 0,
+									force_stop: false,
+								},
+							);
+						}
+					} else {
+						log::info!("###### map_recipe_task.remove {:?}", &recipe_id);
+						map_recipe_task.remove(&recipe_id);
+					};
+				}
+
+				for (recipe_id, recipe) in map_recipe_task.iter_mut() {
+					let triger = MapTriger::<T>::get(recipe.triger_id);
+
+					match triger {
+						Some(Triger::Timer(insert_time, timer_seconds, _max_times)) =>
+							if insert_time + recipe.times * timer_seconds < timestamp_now.as_secs()
+							{
+								(*recipe).times += 1;
+								log::info!(
+									"###### recipe {:?} Current Triger times: {:?} ",
+									recipe_id,
+									recipe.times
+								);
+
+								map_running_action_recipe_task.insert(*recipe_id, recipe.clone());
+							},
+
+						_ => {},
+					}
+				}
+
+				store_hashmap_recipe.set(&map_recipe_task);
+			};
+
+			//todo run action
+			for (recipe_id, recipe) in map_running_action_recipe_task.iter() {
+				let action = MapAction::<T>::get(recipe.action_id);
+				match action {
+					Some(Action::TranferToken(org_id, proposal_id, reciver, amount)) => {
+						match Self::offchain_unsigned_tranfer(
+							block_number,
+							org_id,
+							proposal_id,
+							recipe.times,
+							reciver,
+							amount,
+						) {
+							Ok(_) => {
+								log::info!("###### submit_unsigned_transaction ok");
+								log::info!("###### TranferToken ok");
+
+								match Self::offchain_unsigned_tx_update_recipe_triger_times(
+									block_number,
+									*recipe_id,
+									recipe.times,
+									timestamp_now.as_secs(),
+								) {
+									Ok(_) => {
+										log::info!("###### submit_unsigned_transaction ok");
+										log::info!(
+											"###### offchain_unsigned_tx_update_recipe_triger_time ok"
+										);
+									},
+									Err(e) => {
+										log::info!(
+											"###### submit_unsigned_transaction error  {:?}",
+											e
+										);
+									},
+								};
+
+								if recipe.times >= recipe.max_times {
+									match Self::offchain_unsigned_tx_recipe_done(
+										block_number,
+										*recipe_id,
+									) {
+										Ok(_) => {
+											log::info!("###### submit_unsigned_transaction ok");
+											log::info!(
+												"###### offchain_unsigned_tx_recipe_done ok"
+											);
+										},
+										Err(e) => {
+											log::info!(
+												"###### submit_unsigned_transaction error  {:?}",
+												e
+											);
+										},
+									};
+								}
+							},
+							Err(e) => {
+								log::info!("###### submit_unsigned_transaction error  {:?}", e);
+							},
+						};
+
+						// match Self::offchain_unsigned_tx_update_recipe_triger_times(
+						// 	block_number,
+						// 	*recipe_id,
+						// 	recipe.times,
+						// 	timestamp_now.as_secs(),
+						// ) {
+						// 	Ok(_) => {
+						// 		log::info!("###### submit_unsigned_transaction ok");
+						// 		log::info!(
+						// 			"###### offchain_unsigned_tx_update_recipe_triger_time ok"
+						// 		);
+						// 	},
+						// 	Err(e) => {
+						// 		log::info!(
+						// 			"###### submit_unsigned_transaction error  {:?}",
+						// 			e
+						// 		);
+						// 	},
+						// };
+					},
+					_ => {},
+				}
+			}
+		}
+	}
+
+	#[pallet::validate_unsigned]
+	impl<T: Config> ValidateUnsigned for Pallet<T> {
+		type Call = Call<T>;
+
+		/// Validate unsigned call to this module.
+		///
+		/// By default unsigned transactions are disallowed, but implementing the validator
+		/// here we make sure that some particular calls (the ones produced by offchain worker)
+		/// are being whitelisted and marked as valid.
+		fn validate_unsigned(_source: TransactionSource, call: &Self::Call) -> TransactionValidity {
+			// Firstly let's check that we call the right function.
+			let valid_tx = |provide| {
+				ValidTransaction::with_tag_prefix("ocw-difttt")
+					.priority(T::UnsignedPriority::get())
+					.and_provides([&provide])
+					.longevity(3)
+					.propagate(true)
+					.build()
+			};
+
+			match call {
+				Call::tranfer_unsigned {
+					org_id: _,
+					proposal_id: _,
+					times: _,
+					block_number: _,
+					reciver: _,
+					amount: _,
+				} => valid_tx(b"tranfer_unsigned".to_vec()),
+				Call::update_recipe_triger_times_unsigned {
+					block_number: _,
+					recipe_id: _,
+					times: _,
+					timestamp: _,
+				} => valid_tx(b"update_recipe_triger_times_unsigned".to_vec()),
+				Call::set_recipe_done_unsigned { block_number: _, recipe_id: _ } =>
+					valid_tx(b"set_recipe_done_unsigned".to_vec()),
+
+				_ => InvalidTransaction::Call.into(),
+			}
 		}
 	}
 
 	impl<T: Config> Pallet<T> {
 		pub fn org_account(org_id: u64) -> T::AccountId {
 			T::PalletId::get().into_sub_account_truncating(org_id)
+		}
+
+		fn offchain_unsigned_tx_recipe_done(
+			block_number: T::BlockNumber,
+			recipe_id: u64,
+		) -> Result<(), Error<T>> {
+			let call = Call::set_recipe_done_unsigned { block_number, recipe_id };
+
+			SubmitTransaction::<T, Call<T>>::submit_unsigned_transaction(call.into()).map_err(|e| {
+				log::error!(
+					"###offchain_unsigned_tx_recipe_done Failed in offchain_unsigned_tx {:?}",
+					e
+				);
+				<Error<T>>::OffchainUnsignedTxError
+			})
+		}
+
+		fn offchain_unsigned_tx_update_recipe_triger_times(
+			block_number: T::BlockNumber,
+			recipe_id: u64,
+			times: u64,
+			timestamp: u64,
+		) -> Result<(), Error<T>> {
+			let call = Call::update_recipe_triger_times_unsigned {
+				block_number,
+				recipe_id,
+				times,
+				timestamp,
+			};
+
+			SubmitTransaction::<T, Call<T>>::submit_unsigned_transaction(call.into()).map_err(|e| {
+				log::error!("###offchain_unsigned_tx_update_recipe_triger_times Failed in offchain_unsigned_tx {:?}", e);
+				<Error<T>>::OffchainUnsignedTxError
+			})
+		}
+
+		fn offchain_unsigned_tranfer(
+			block_number: T::BlockNumber,
+			org_id: u64,
+			proposal_id: u64,
+			times: u64,
+			reciver: T::AccountId,
+			amount: BalanceOf<T>,
+		) -> Result<(), Error<T>> {
+			let call = Call::tranfer_unsigned {
+				block_number,
+				org_id,
+				proposal_id,
+				times,
+				reciver,
+				amount,
+			};
+
+			SubmitTransaction::<T, Call<T>>::submit_unsigned_transaction(call.into()).map_err(|e| {
+				log::error!("###offchain_unsigned_tranfer in offchain_unsigned_tx {:?}", e);
+				<Error<T>>::OffchainUnsignedTxError
+			})
+		}
+	}
+
+	impl<T: Config> BlockNumberProvider for Pallet<T> {
+		type BlockNumber = T::BlockNumber;
+
+		fn current_block_number() -> Self::BlockNumber {
+			<frame_system::Pallet<T>>::block_number()
 		}
 	}
 }

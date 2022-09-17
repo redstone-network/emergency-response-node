@@ -1477,10 +1477,16 @@ parameter_types! {
 	pub const DonatePalletId: PalletId = PalletId(*b"py/donat");
 }
 
+parameter_types! {
+	pub const UnsignedPriority: BlockNumber = 1;
+}
+
 impl pallet_donate::Config for Runtime {
 	type Event = Event;
 	type Currency = Balances;
+	type TimeProvider = pallet_timestamp::Pallet<Runtime>;
 	type PalletId = DonatePalletId;
+	type UnsignedPriority = UnsignedPriority;
 }
 
 construct_runtime!(
