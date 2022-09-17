@@ -25,7 +25,7 @@ sp-std = { default-features = false, version = "4.0.0-dev", git = "https://githu
 sp-runtime = { git = "https://github.com/paritytech/substrate", default-features = false, branch = "polkadot-v0.9.24" }
 pallet-balances = { git = "https://github.com/paritytech/substrate", branch = "polkadot-v0.9.24", default-features = false}
 
-primitives = { package = "node-primitives", path = "../../primitives", default-features = false }
+node-primitives = { package = "node-primitives", path = "../../primitives", default-features = false }
 
 [dev-dependencies]
 sp-core = { git = "https://github.com/paritytech/substrate", default-features = false, branch = "polkadot-v0.9.24" }
