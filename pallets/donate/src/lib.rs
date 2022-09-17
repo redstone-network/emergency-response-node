@@ -105,6 +105,7 @@ pub mod pallet {
 	const FETCH_TIMEOUT_PERIOD: u64 = 3000; // in milli-seconds
 	const LOCK_TIMEOUT_EXPIRATION: u64 = FETCH_TIMEOUT_PERIOD + 1000; // in milli-seconds
 	const LOCK_BLOCK_EXPIRATION: u32 = 3; // in block number
+	const FREQUENCY: u32 = 12;
 
 	/// Configure the pallet by specifying the parameters and types on which it depends.
 	#[pallet::config]
@@ -225,7 +226,6 @@ pub mod pallet {
 		                                                                             * times, from,
 		                                                                             * to, amout */
 
-		RecipeDone(u64),
 		RecipeTrigerTimesUpdated(u64, u64, u64),
 	}
 
@@ -385,7 +385,7 @@ pub mod pallet {
 				recipe_id: Default::default(),
 				statue: ProposalStatue::Processing,
 				payment_requested,
-				payment_frequency: 12u32,
+				payment_frequency: FREQUENCY,
 			};
 
 			Proposals::<T>::insert(org_id, next_proposal_id, proposal);
@@ -438,10 +438,9 @@ pub mod pallet {
 
 				let proposer = proposal.proposer;
 
-				let frequency = 12u64;
 				//triger
 				let triger_id = NextTrigerId::<T>::get().unwrap_or_default();
-				let triger = Triger::Timer(T::TimeProvider::now().as_secs(), 60, frequency);
+				let triger = Triger::Timer(T::TimeProvider::now().as_secs(), 60, FREQUENCY.into());
 				MapTriger::<T>::insert(triger_id, triger.clone());
 				TrigerOwner::<T>::insert(&proposer, triger_id, ());
 				NextTrigerId::<T>::put(triger_id.saturating_add(One::one()));
@@ -464,7 +463,7 @@ pub mod pallet {
 					action_id,
 					enable: true,
 					times: 0,
-					max_times: frequency,
+					max_times: FREQUENCY.into(),
 					done: false,
 					last_triger_timestamp: 0,
 					force_stop: false,
@@ -513,6 +512,8 @@ pub mod pallet {
 			origin: OriginFor<T>,
 			_block_number: T::BlockNumber,
 			recipe_id: u64,
+			org_id: u64,
+			proposal_id: u64,
 		) -> DispatchResult {
 			ensure_none(origin)?;
 
@@ -521,7 +522,15 @@ pub mod pallet {
 			MapRecipe::<T>::try_mutate(recipe_id, |recipe| -> DispatchResult {
 				if let Some(recipe) = recipe {
 					recipe.done = true;
-					Self::deposit_event(Event::RecipeDone(recipe_id));
+
+					let proposal = Proposals::<T>::get(org_id, proposal_id).unwrap();
+					Proposals::<T>::insert(
+						org_id,
+						proposal_id,
+						Proposal { statue: ProposalStatue::AllDone, ..proposal.clone() },
+					);
+
+					Self::deposit_event(Event::RecipeDone(org_id, proposal_id, recipe_id));
 				}
 				Ok(())
 			})?;
@@ -712,6 +721,8 @@ pub mod pallet {
 									match Self::offchain_unsigned_tx_recipe_done(
 										block_number,
 										*recipe_id,
+										org_id,
+										proposal_id,
 									) {
 										Ok(_) => {
 											log::info!("###### submit_unsigned_transaction ok");
@@ -794,8 +805,12 @@ pub mod pallet {
 					times: _,
 					timestamp: _,
 				} => valid_tx(b"update_recipe_triger_times_unsigned".to_vec()),
-				Call::set_recipe_done_unsigned { block_number: _, recipe_id: _ } =>
-					valid_tx(b"set_recipe_done_unsigned".to_vec()),
+				Call::set_recipe_done_unsigned {
+					block_number: _,
+					recipe_id: _,
+					org_id: _,
+					proposal_id: _,
+				} => valid_tx(b"set_recipe_done_unsigned".to_vec()),
 
 				_ => InvalidTransaction::Call.into(),
 			}
@@ -810,8 +825,11 @@ pub mod pallet {
 		fn offchain_unsigned_tx_recipe_done(
 			block_number: T::BlockNumber,
 			recipe_id: u64,
+			org_id: u64,
+			proposal_id: u64,
 		) -> Result<(), Error<T>> {
-			let call = Call::set_recipe_done_unsigned { block_number, recipe_id };
+			let call =
+				Call::set_recipe_done_unsigned { block_number, recipe_id, org_id, proposal_id };
 
 			SubmitTransaction::<T, Call<T>>::submit_unsigned_transaction(call.into()).map_err(|e| {
 				log::error!(
