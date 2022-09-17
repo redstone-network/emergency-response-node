@@ -634,7 +634,7 @@ pub mod pallet {
 									action_id: recipe.action_id,
 									enable: true,
 									times: 0,
-									max_times: 0,
+									max_times: recipe.max_times,
 									done: false,
 									last_triger_timestamp: 0,
 									force_stop: false,
