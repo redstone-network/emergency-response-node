@@ -36,7 +36,7 @@ pub struct Proposal<AccountId, Balance> {
 	pub votes: u128,
 	pub approve_votes: u128,
 	pub deny_votes: u128,
-	pub details: BoundedVec<u8, ConstU32<128>>,
+	pub details: BoundedVec<u8, ConstU32<2048>>,
 	pub org_id: u64,
 	pub recipe_id: u128,
 	pub statue: ProposalStatue,
