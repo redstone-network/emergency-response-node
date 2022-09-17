@@ -226,6 +226,7 @@ pub mod pallet {
 		                                                                             * times, from,
 		                                                                             * to, amout */
 
+		RecipeDone(u64, u64, u64),
 		RecipeTrigerTimesUpdated(u64, u64, u64),
 	}
 
